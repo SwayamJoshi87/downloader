@@ -321,11 +321,22 @@ function handleEvents(req: http.IncomingMessage, res: http.ServerResponse) {
     Connection: 'keep-alive',
   });
   res.write(':ok\n\n');
+  req.socket.setTimeout(0);
+  req.socket.setNoDelay(true);
+  req.socket.setKeepAlive(true);
 
   const id = ++clientId;
   clients.set(id, { id, res });
 
+  // Without a periodic write, an idle SSE connection (no downloads/resolves in progress)
+  // can sit long enough for an intermediary (e.g. the Vite dev proxy) to drop it, which
+  // makes the browser's EventSource silently reconnect and log a spurious error each time.
+  const heartbeat = setInterval(() => {
+    res.write(':heartbeat\n\n');
+  }, 15000);
+
   req.on('close', () => {
+    clearInterval(heartbeat);
     clients.delete(id);
   });
 }

@@ -21,6 +21,8 @@ import {
   HelpCircle,
   Clock,
   Wifi,
+  CheckCircle2,
+  UserCheck,
 } from 'lucide-react';
 
 interface ResolveEntry {
@@ -204,6 +206,25 @@ export default function App() {
     [parsed, selected]
   );
 
+  const resolveStats = useMemo(() => {
+    let ok = 0;
+    let fail = 0;
+    let processing = 0;
+    resolveEntries.forEach((entry) => {
+      if (entry.status === 'ok') ok++;
+      else if (entry.status === 'fail') fail++;
+      else if (entry.status === 'processing') processing++;
+    });
+    const total = resolving?.total || selectedItems.length;
+    return { ok, fail, processing, total, done: ok + fail };
+  }, [resolveEntries, resolving, selectedItems.length]);
+
+  // The resolve queue keeps running in the background while aria2 downloads already-resolved
+  // links, so this card must stay visible independently of the download card's own phase.
+  const showResolveCard = phase !== 'idle' && (resolving !== null || resolveEntries.size > 0);
+  const resolveComplete = resolveStats.total > 0 && resolveStats.done >= resolveStats.total;
+  const showDownloadCard = progress !== null || phase === 'extracting' || phase === 'done';
+
   const handleStart = async () => {
     if (!parsed || selectedItems.length === 0 || !downloadFolder || !outputFolder) return;
     setPhase('submitting');
@@ -282,7 +303,7 @@ export default function App() {
         <div className="flex items-start justify-between gap-4">
           <div>
             <h1 className="text-3xl font-bold tracking-tight">FitGirl Downloader</h1>
-            <p className="text-muted-foreground">Decrypt pastes, resolve via ff-resolver, download with aria2c, auto-extract.</p>
+            <p className="text-muted-foreground">Decrypt pastes, resolve links through the ff-resolver queue (human-verified), download with aria2c, auto-extract.</p>
           </div>
           <div className="flex items-center gap-2">
             <Button variant="outline" size="icon" onClick={() => setDarkMode((v) => !v)} title="Toggle dark mode">
@@ -406,24 +427,37 @@ export default function App() {
           </Card>
         )}
 
-        {/* ── Resolution phase ── */}
-        {(phase === 'submitting' || phase === 'resolving') && (
+        {/* ── Resolve queue (runs on the ff-resolver server; stays visible even after
+             downloads start, since resolving and downloading are pipelined in parallel) ── */}
+        {showResolveCard && (
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
-                <Wifi className="h-5 w-5" />
-                {phase === 'submitting' ? 'Submitting to ff-resolver...' : 'Resolving links'}
+                {phase === 'submitting' ? (
+                  <Wifi className="h-5 w-5" />
+                ) : resolveComplete ? (
+                  <CheckCircle2 className="h-5 w-5 text-green-500" />
+                ) : (
+                  <UserCheck className="h-5 w-5" />
+                )}
+                {phase === 'submitting'
+                  ? 'Submitting to ff-resolver...'
+                  : resolveComplete
+                  ? `Resolved ${resolveStats.ok}/${resolveStats.total} link(s)${resolveStats.fail > 0 ? ` (${resolveStats.fail} failed)` : ''}`
+                  : 'Resolving links'}
               </CardTitle>
               <CardDescription>
                 {phase === 'submitting'
                   ? 'Sending batch to the ff-resolver service on your homelab.'
-                  : `ff-resolver is processing ${resolveEntries.size > 0 ? resolveEntries.size : '?'}/${resolving?.total || selectedItems.length} links. Downloads start as each link resolves.`}
+                  : resolveComplete
+                  ? 'All links have gone through the resolve queue. Any files that failed to resolve were skipped.'
+                  : `Queued on the resolver server — a human manually clears each Cloudflare challenge, so this can take a moment per link. ${resolveStats.done}/${resolveStats.total} done so far. Already-resolved files start downloading immediately below, in parallel with the rest of this queue.`}
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              {resolving && (
+              {resolving && !resolveComplete && (
                 <div className="space-y-2">
-                  <Progress value={(resolving.current / resolving.total) * 100} />
+                  <Progress value={(resolveStats.done / resolveStats.total) * 100} />
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
                     <Loader2 className="h-4 w-4 animate-spin" />
                     <span>{resolving.message}</span>
@@ -461,8 +495,8 @@ export default function App() {
                           }`}>
                             {status === 'ok' ? 'Resolved' :
                              status === 'fail' ? 'Failed' :
-                             status === 'processing' ? 'Resolving…' :
-                             'Pending'}
+                             status === 'processing' ? 'Awaiting manual verification…' :
+                             'Queued'}
                           </span>
                         </div>
                       );
@@ -474,18 +508,24 @@ export default function App() {
           </Card>
         )}
 
-        {/* ── Download / Extract / Done phases ── */}
-        {(phase === 'downloading' || phase === 'extracting' || phase === 'done') && (
+        {/* ── Downloads / Extract / Done — separate card, can be visible at the same time as
+             the resolve queue above since aria2 starts on each link as soon as it resolves ── */}
+        {showDownloadCard && (
           <Card>
             <CardHeader>
               <CardTitle>
-                {phase === 'downloading' && 'Downloads'}
                 {phase === 'extracting' && 'Extracting...'}
                 {phase === 'done' && 'Complete'}
+                {phase !== 'extracting' && phase !== 'done' && 'Downloads'}
               </CardTitle>
+              {!resolveComplete && phase !== 'extracting' && phase !== 'done' && (
+                <CardDescription>
+                  Downloading files as they come out of the resolve queue above.
+                </CardDescription>
+              )}
             </CardHeader>
             <CardContent className="space-y-6">
-              {(phase === 'downloading' || phase === 'extracting' || phase === 'done') && progress && (
+              {progress && (
                 <>
                   <div className="space-y-2">
                     <div className="flex items-center justify-between text-sm">
