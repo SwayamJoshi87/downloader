@@ -4,16 +4,18 @@
     "target": "es2023",
     "lib": ["ES2023"],
     "types": ["node"],
+    "typeRoots": [
+      "./node_modules/@types",
+      "/home/server/.npm-global/lib/node_modules/@types"
+    ],
     "skipLibCheck": true,
 
-    /* Bundler mode */
     "module": "nodenext",
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "moduleDetection": "force",
     "noEmit": true,
 
-    /* Linting */
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "erasableSyntaxOnly": true,

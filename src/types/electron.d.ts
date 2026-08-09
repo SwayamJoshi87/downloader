@@ -28,7 +28,7 @@ interface Aria2Progress {
 
 type Aria2Event =
   | { type: 'progress'; data: Aria2Progress }
-  | { type: 'resolving'; current: number; total: number; message: string }
+  | { type: 'resolving'; current: number; total: number; message: string; url?: string; filename?: string; status?: 'ok' | 'fail' }
   | { type: 'done' }
   | { type: 'error'; message: string };
 

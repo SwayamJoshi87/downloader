@@ -57,7 +57,7 @@ function clean() {
 
 function copyRuntimeDependencies() {
   const modulesDir = path.join(appDir, 'node_modules');
-  for (const moduleName of ['base-x', 'bs58', 'playwright', 'playwright-core']) {
+  for (const moduleName of ['base-x', 'bs58']) {
     copyDir(path.join(root, 'node_modules', moduleName), path.join(modulesDir, moduleName));
   }
 

@@ -250,12 +250,20 @@ async function handleStart(req: http.IncomingMessage, res: http.ServerResponse) 
                 type: 'resolving',
                 current: queuedCount,
                 total: selected.length,
-                message: `Queued ${queuedCount}/${selected.length}: ${filename}`,
+                message: `Resolved: ${filename}`,
+                url: r.url,
+                filename,
+                status: 'ok',
               });
             } else {
               sendDownloadEvent({
-                type: 'error',
-                message: `Failed to resolve ${filename}: ${r.error || 'unknown error'}`,
+                type: 'resolving',
+                current: queuedCount + 1,
+                total: selected.length,
+                message: `Failed: ${filename} — ${r.error || 'unknown'}`,
+                url: r.url,
+                filename,
+                status: 'fail',
               });
               queuedCount++;
             }
