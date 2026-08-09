@@ -1,0 +1,334 @@
+import http from 'node:http';
+import fs from 'node:fs';
+import fsp from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
+import { inspect } from 'node:util';
+import { decryptPaste } from './lib/pastebin.js';
+import { extractLinks } from './lib/links.js';
+import { resolveFuckingFastLink } from './ff-resolver.js';
+import { downloadWithAria2Queue, killAria2 } from './lib/aria2.js';
+import { extractAndOrganize } from './lib/extractor.js';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PUBLIC_DIR = path.join(__dirname, '..', 'dist');
+const ERROR_LOG_PATH = path.join(process.cwd(), 'server-error.log');
+function logError(message, err) {
+    const timestamp = new Date().toISOString();
+    const stack = err instanceof Error
+        ? err.stack || err.message
+        : err === undefined
+            ? ''
+            : typeof err === 'string'
+                ? err
+                : inspect(err, { depth: 6 });
+    const line = `[${timestamp}] ${message}\n${stack || ''}\n\n`;
+    console.error(line.trimEnd());
+    try {
+        fs.appendFileSync(ERROR_LOG_PATH, line);
+    }
+    catch (logErr) {
+        console.error(`[${timestamp}] Failed to write error log at ${ERROR_LOG_PATH}`, logErr);
+    }
+}
+process.on('uncaughtException', (err) => {
+    logError('uncaught exception', err);
+});
+process.on('unhandledRejection', (reason) => {
+    logError('unhandled rejection', reason);
+});
+const MIME = {
+    '.html': 'text/html',
+    '.js': 'application/javascript',
+    '.css': 'text/css',
+    '.json': 'application/json',
+    '.png': 'image/png',
+    '.ico': 'image/x-icon',
+};
+let clientId = 0;
+const clients = new Map();
+function broadcast(event, data) {
+    const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    for (const client of clients.values()) {
+        client.res.write(payload);
+    }
+}
+function sendDownloadEvent(event) {
+    broadcast('download', event);
+}
+function sendExtractEvent(event) {
+    broadcast('extract', event);
+}
+async function serveStatic(req, res) {
+    let url = req.url || '/';
+    if (url.includes('?'))
+        url = url.split('?')[0];
+    if (url === '/')
+        url = '/index.html';
+    const filePath = path.join(PUBLIC_DIR, url);
+    if (!filePath.startsWith(PUBLIC_DIR))
+        return false;
+    try {
+        const content = await fsp.readFile(filePath);
+        const ext = path.extname(filePath);
+        res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+        res.end(content);
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
+async function readJson(req) {
+    return new Promise((resolve, reject) => {
+        let body = '';
+        req.on('data', (chunk) => (body += chunk));
+        req.on('end', () => {
+            try {
+                resolve(JSON.parse(body));
+            }
+            catch (err) {
+                reject(err);
+            }
+        });
+    });
+}
+function json(res, status, data) {
+    res.writeHead(status, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(data));
+}
+async function withConcurrency(items, limit, fn) {
+    const results = new Array(items.length);
+    const iterator = items.entries();
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+        for (const [i, item] of iterator) {
+            results[i] = await fn(item);
+        }
+    }));
+    return results;
+}
+async function listFolder(folderPath) {
+    const resolved = path.resolve(folderPath || process.cwd());
+    const entries = await fsp.readdir(resolved, { withFileTypes: true });
+    return entries
+        .map((e) => ({ name: e.name, isDirectory: e.isDirectory() }))
+        .sort((a, b) => (a.isDirectory === b.isDirectory ? a.name.localeCompare(b.name) : a.isDirectory ? -1 : 1));
+}
+function getDrives() {
+    return new Promise((resolve) => {
+        if (process.platform !== 'win32') {
+            resolve(['/']);
+            return;
+        }
+        const ps = spawn('powershell.exe', ['-NoProfile', '-Command', 'Get-CimInstance Win32_LogicalDisk | Select-Object -ExpandProperty DeviceID'], { shell: false });
+        let output = '';
+        ps.stdout.on('data', (d) => (output += d.toString()));
+        ps.stderr.on('data', (d) => console.error('[drives]', d.toString().trim()));
+        ps.on('close', () => {
+            const drives = output
+                .split('\n')
+                .map((line) => line.trim())
+                .filter((line) => /^[A-Za-z]:$/.test(line));
+            resolve(drives.length > 0 ? drives : ['C:']);
+        });
+        ps.on('error', () => resolve(['C:']));
+    });
+}
+async function handleDrives(_req, res) {
+    try {
+        const drives = await getDrives();
+        json(res, 200, { drives });
+    }
+    catch (err) {
+        json(res, 500, { error: err.message });
+    }
+}
+async function handleListFolder(req, res) {
+    try {
+        const { path: folderPath } = await readJson(req);
+        const entries = await listFolder(folderPath);
+        json(res, 200, { path: path.resolve(folderPath || process.cwd()), entries });
+    }
+    catch (err) {
+        json(res, 500, { error: err.message });
+    }
+}
+async function handleOpenFolder(req, res) {
+    try {
+        const { folderPath } = await readJson(req);
+        const command = process.platform === 'win32'
+            ? `explorer "${folderPath}"`
+            : process.platform === 'darwin'
+                ? `open "${folderPath}"`
+                : `xdg-open "${folderPath}"`;
+        spawn(command, { shell: true, detached: true, stdio: 'ignore' });
+        json(res, 200, { opened: true });
+    }
+    catch (err) {
+        json(res, 500, { error: err.message });
+    }
+}
+async function handleOpenHelp(_req, res) {
+    try {
+        const helpPath = path.join(process.cwd(), 'help.md');
+        const command = process.platform === 'win32'
+            ? `notepad "${helpPath}"`
+            : process.platform === 'darwin'
+                ? `open -e "${helpPath}"`
+                : `xdg-open "${helpPath}"`;
+        spawn(command, { shell: true, detached: true, stdio: 'ignore' });
+        json(res, 200, { opened: true });
+    }
+    catch (err) {
+        json(res, 500, { error: err.message });
+    }
+}
+async function handleDecrypt(req, res) {
+    try {
+        const { url } = await readJson(req);
+        const plaintext = await decryptPaste(url);
+        const parsed = extractLinks(plaintext);
+        json(res, 200, parsed);
+    }
+    catch (err) {
+        json(res, 500, { error: err.message });
+    }
+}
+async function handleStart(req, res) {
+    try {
+        const { items, downloadFolder, outputFolder } = await readJson(req);
+        const selected = items.filter((i) => i.url);
+        sendDownloadEvent({ type: 'resolving', current: 0, total: selected.length, message: `Resolving ${selected.length} link(s)...` });
+        let queuedCount = 0;
+        await downloadWithAria2Queue(selected.length, downloadFolder, (event) => sendDownloadEvent(event), async (addDownload) => {
+            await withConcurrency(selected, 3, async (item) => {
+                const resolved = await resolveFuckingFastLink(item.url);
+                await addDownload({ directUrl: resolved.directUrl, filename: item.name });
+                queuedCount++;
+                sendDownloadEvent({
+                    type: 'resolving',
+                    current: queuedCount,
+                    total: selected.length,
+                    message: `Queued ${queuedCount}/${selected.length}: ${item.name}`,
+                });
+            });
+        });
+        sendDownloadEvent({ type: 'done' });
+        await extractAndOrganize(downloadFolder, outputFolder, (event) => sendExtractEvent(event));
+        json(res, 200, { done: true });
+    }
+    catch (err) {
+        logError('/api/start failed', err);
+        sendDownloadEvent({ type: 'error', message: err.message });
+        json(res, 500, { error: err.message, stack: err.stack });
+    }
+}
+function handleCancel(_req, res) {
+    killAria2();
+    json(res, 200, { canceled: true });
+}
+function handleEvents(req, res) {
+    res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+    });
+    res.write(':ok\n\n');
+    const id = ++clientId;
+    clients.set(id, { id, res });
+    req.on('close', () => {
+        clients.delete(id);
+    });
+}
+const server = http.createServer(async (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    if (req.method === 'OPTIONS') {
+        res.writeHead(204);
+        res.end();
+        return;
+    }
+    try {
+        if (req.url?.startsWith('/api/events')) {
+            handleEvents(req, res);
+            return;
+        }
+        if (req.method === 'POST' && req.url === '/api/drives') {
+            await handleDrives(req, res);
+            return;
+        }
+        if (req.method === 'POST' && req.url === '/api/list-folder') {
+            await handleListFolder(req, res);
+            return;
+        }
+        if (req.method === 'POST' && req.url === '/api/open-folder') {
+            await handleOpenFolder(req, res);
+            return;
+        }
+        if (req.method === 'POST' && req.url === '/api/help') {
+            await handleOpenHelp(req, res);
+            return;
+        }
+        if (req.method === 'POST' && req.url === '/api/decrypt') {
+            await handleDecrypt(req, res);
+            return;
+        }
+        if (req.method === 'POST' && req.url === '/api/start') {
+            await handleStart(req, res);
+            return;
+        }
+        if (req.method === 'POST' && req.url === '/api/cancel') {
+            handleCancel(req, res);
+            return;
+        }
+        if (await serveStatic(req, res))
+            return;
+        res.writeHead(404);
+        res.end('Not found');
+    }
+    catch (err) {
+        logError(`request error: ${req.method} ${req.url}`, err);
+        if (!res.headersSent) {
+            json(res, 500, {
+                error: err.message,
+                stack: err.stack,
+            });
+        }
+    }
+});
+function findPort(preferredPort) {
+    return new Promise((resolve, reject) => {
+        const s = new http.Server();
+        s.listen(preferredPort, '127.0.0.1', () => {
+            s.close(() => resolve(preferredPort));
+        });
+        s.on('error', (err) => {
+            if (err.code === 'EADDRINUSE' && preferredPort < 8799) {
+                resolve(findPort(preferredPort + 1));
+            }
+            else {
+                reject(err);
+            }
+        });
+    });
+}
+async function startServer(preferredPort = 8765) {
+    const port = await findPort(preferredPort);
+    server.listen(port, '127.0.0.1', () => {
+        const url = `http://127.0.0.1:${port}`;
+        console.log(`[server] FitGirl Downloader web UI running at ${url}`);
+        console.log(`[server] Errors are also written to: ${ERROR_LOG_PATH}`);
+        if (process.env.NO_OPEN_BROWSER) {
+            return;
+        }
+        // Open browser.
+        const command = process.platform === 'win32'
+            ? `start "" "${url}"`
+            : process.platform === 'darwin'
+                ? `open "${url}"`
+                : `xdg-open "${url}"`;
+        spawn(command, { shell: true, detached: true, stdio: 'ignore' });
+    });
+}
+startServer();
