@@ -53,7 +53,7 @@ interface Aria2Progress {
 
 interface ResolveEntry {
   filename: string;
-  status: 'pending' | 'ok' | 'fail';
+  status: 'pending' | 'processing' | 'ok' | 'fail';
   message: string;
 }
 
@@ -154,7 +154,7 @@ export default function App() {
             const next = new Map(prev);
             next.set(event.url!, {
               filename: event.filename || '',
-              status: event.status || 'ok',
+              status: event.status === undefined ? 'processing' : (event.status || 'ok'),
               message: event.message,
             });
             return next;
@@ -482,6 +482,8 @@ export default function App() {
                             <Check className="h-4 w-4 text-green-500 shrink-0" />
                           ) : status === 'fail' ? (
                             <X className="h-4 w-4 text-red-500 shrink-0" />
+                          ) : status === 'processing' ? (
+                            <Loader2 className="h-4 w-4 text-blue-400 shrink-0 animate-spin" />
                           ) : (
                             <Clock className="h-4 w-4 text-muted-foreground shrink-0" />
                           )}
@@ -489,10 +491,12 @@ export default function App() {
                           <span className={`text-xs shrink-0 ${
                             status === 'ok' ? 'text-green-500' :
                             status === 'fail' ? 'text-red-500' :
+                            status === 'processing' ? 'text-blue-400' :
                             'text-muted-foreground'
                           }`}>
                             {status === 'ok' ? 'Resolved' :
                              status === 'fail' ? 'Failed' :
+                             status === 'processing' ? 'Resolving…' :
                              'Pending'}
                           </span>
                         </div>

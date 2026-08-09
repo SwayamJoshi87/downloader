@@ -236,8 +236,24 @@ async function handleStart(req: http.IncomingMessage, res: http.ServerResponse) 
       async (addDownload) => {
         // Poll ff-resolver until complete
         let lastDone = 0;
+        let lastCurrent: string | null = null;
         while (true) {
           const job = await (await fetch(`${FF_RESOLVER_URL}/jobs/${job_id}`)).json();
+
+          // Notify client which link is currently being resolved
+          if (job.current && job.current !== lastCurrent) {
+            lastCurrent = job.current;
+            const cf = filenameMap.get(job.current) || job.current.split('/').pop() || '';
+            sendDownloadEvent({
+              type: 'resolving',
+              current: job.progress?.done || 0,
+              total: selected.length,
+              message: `Resolving: ${cf}`,
+              url: job.current,
+              filename: cf,
+              status: undefined,
+            });
+          }
 
           // Feed newly resolved links to aria2c
           for (let i = lastDone; i < (job.results?.length || 0); i++) {
