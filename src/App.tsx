@@ -284,6 +284,8 @@ export default function App() {
     let nextPath: string;
     if (/^[A-Za-z]:[\\/]/.test(name)) {
       nextPath = name.endsWith('\\') || name.endsWith('/') ? name : name + '\\';
+    } else if (/^[A-Za-z]:$/.test(name)) {
+      nextPath = name + '\\';
     } else {
       const separator = folderBrowser.currentPath.includes('\\') ? '\\' : '/';
       nextPath = name === '..' ? folderBrowser.currentPath + separator + '..' : folderBrowser.currentPath + separator + name;
