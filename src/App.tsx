@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { httpApi } from './http-api';
+import { httpApi, type ParsedPaste, type FileProgress, type Aria2Progress } from './http-api';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -22,34 +22,6 @@ import {
   Clock,
   Wifi,
 } from 'lucide-react';
-
-interface PasteItem {
-  url: string;
-  name: string;
-  isOptional: boolean;
-  isSelective: boolean;
-}
-
-interface ParsedPaste {
-  title: string;
-  items: PasteItem[];
-}
-
-interface FileProgress {
-  gid: string;
-  filename: string;
-  totalBytes: number;
-  downloadedBytes: number;
-  speedBytesPerSec: number;
-  status: 'active' | 'waiting' | 'paused' | 'error' | 'complete' | 'removed';
-}
-
-interface Aria2Progress {
-  totalBytes: number;
-  downloadedBytes: number;
-  speedBytesPerSec: number;
-  files: FileProgress[];
-}
 
 interface ResolveEntry {
   filename: string;
@@ -256,13 +228,6 @@ export default function App() {
   const chooseFolder = async (setter: (path: string) => void, currentPath: string) => {
     try {
       setError(null);
-      if (window.api?.chooseFolder) {
-        const selected = currentPath
-          ? await window.api.chooseFolder(currentPath)
-          : await window.api.chooseFolder();
-        if (selected) setter(selected);
-        return;
-      }
       await openFolderBrowser(setter, currentPath);
     } catch (err) {
       setError((err as Error).message);

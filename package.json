@@ -3,7 +3,6 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "main": "dist-electron/main.js",
   "scripts": {
     "start": "npm run build && npm run server",
     "dev": "node scripts/dev-server.js",
