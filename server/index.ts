@@ -10,7 +10,7 @@ import { extractLinks } from './lib/links.js';
 import { downloadWithAria2Queue, killAria2 } from './lib/aria2.js';
 import { extractAndOrganize } from './lib/extractor.js';
 
-const FF_RESOLVER_URL = process.env.FF_RESOLVER_URL || 'http://192.168.2.50:8765';
+const FF_RESOLVER_URL = process.env.FF_RESOLVER_URL || 'https://downloader.swayamjoshi.dev';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, '..', 'dist');
