@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { httpApi } from './http-api';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -13,11 +13,14 @@ import {
   FolderInput,
   Download,
   Check,
+  X,
   AlertCircle,
   Loader2,
   Moon,
   Sun,
   HelpCircle,
+  Clock,
+  Wifi,
 } from 'lucide-react';
 
 interface PasteItem {
@@ -46,6 +49,12 @@ interface Aria2Progress {
   downloadedBytes: number;
   speedBytesPerSec: number;
   files: FileProgress[];
+}
+
+interface ResolveEntry {
+  filename: string;
+  status: 'pending' | 'ok' | 'fail';
+  message: string;
 }
 
 function formatBytes(bytes: number | undefined): string {
@@ -77,20 +86,13 @@ function formatEta(seconds: number | undefined): string {
 
 function statusLabel(status: FileProgress['status']): string {
   switch (status) {
-    case 'active':
-      return 'Downloading';
-    case 'waiting':
-      return 'Waiting';
-    case 'paused':
-      return 'Paused';
-    case 'error':
-      return 'Error';
-    case 'complete':
-      return 'Complete';
-    case 'removed':
-      return 'Removed';
-    default:
-      return status;
+    case 'active': return 'Downloading';
+    case 'waiting': return 'Waiting';
+    case 'paused': return 'Paused';
+    case 'error': return 'Error';
+    case 'complete': return 'Complete';
+    case 'removed': return 'Removed';
+    default: return status;
   }
 }
 
@@ -106,9 +108,10 @@ export default function App() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [phase, setPhase] = useState<'idle' | 'resolving' | 'downloading' | 'extracting' | 'done'>('idle');
+  const [phase, setPhase] = useState<'idle' | 'submitting' | 'resolving' | 'downloading' | 'extracting' | 'done'>('idle');
   const [progress, setProgress] = useState<Aria2Progress | null>(null);
   const [resolving, setResolving] = useState<{ current: number; total: number; message: string } | null>(null);
+  const [resolveEntries, setResolveEntries] = useState<Map<string, ResolveEntry>>(new Map());
   const [extractMessage, setExtractMessage] = useState<string>('');
   const [extractProgress, setExtractProgress] = useState<{ current: number; total: number } | null>(null);
   const [darkMode, setDarkMode] = useState(() => {
@@ -140,8 +143,23 @@ export default function App() {
         setProgress(event.data);
         setPhase('downloading');
       } else if (event.type === 'resolving') {
-        setPhase((prev) => (prev === 'downloading' || prev === 'extracting' || prev === 'done' ? prev : 'resolving'));
+        setPhase((prev) =>
+          prev === 'downloading' || prev === 'extracting' || prev === 'done' ? prev : 'resolving'
+        );
         setResolving({ current: event.current, total: event.total, message: event.message });
+
+        // Track per-link resolution status
+        if (event.url) {
+          setResolveEntries((prev) => {
+            const next = new Map(prev);
+            next.set(event.url!, {
+              filename: event.filename || '',
+              status: event.status || 'ok',
+              message: event.message,
+            });
+            return next;
+          });
+        }
       } else if (event.type === 'done') {
         setPhase('extracting');
       } else if (event.type === 'error') {
@@ -216,8 +234,9 @@ export default function App() {
 
   const handleStart = async () => {
     if (!parsed || selectedItems.length === 0 || !downloadFolder || !outputFolder) return;
-    setPhase('resolving');
+    setPhase('submitting');
     setResolving(null);
+    setResolveEntries(new Map());
     setProgress(null);
     setExtractMessage('');
     setExtractProgress(null);
@@ -296,7 +315,7 @@ export default function App() {
         <div className="flex items-start justify-between gap-4">
           <div>
             <h1 className="text-3xl font-bold tracking-tight">FitGirl Downloader</h1>
-            <p className="text-muted-foreground">Decrypt pastes, download with aria2c, and auto-extract archives.</p>
+            <p className="text-muted-foreground">Decrypt pastes, resolve via ff-resolver, download with aria2c, auto-extract.</p>
           </div>
           <div className="flex items-center gap-2">
             <Button variant="outline" size="icon" onClick={() => setDarkMode((v) => !v)} title="Toggle dark mode">
@@ -375,21 +394,11 @@ export default function App() {
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="flex flex-wrap gap-2">
-                <Button variant="outline" size="sm" onClick={selectAll}>
-                  Select All
-                </Button>
-                <Button variant="outline" size="sm" onClick={deselectAll}>
-                  Deselect All
-                </Button>
-                <Button variant="outline" size="sm" onClick={() => selectByKeyword('4K')}>
-                  Check All 4K
-                </Button>
-                <Button variant="outline" size="sm" onClick={() => selectByKeyword('selective')}>
-                  Check All Selective
-                </Button>
-                <Button variant="outline" size="sm" onClick={() => selectByKeyword('optional')}>
-                  Check All Optional
-                </Button>
+                <Button variant="outline" size="sm" onClick={selectAll}>Select All</Button>
+                <Button variant="outline" size="sm" onClick={deselectAll}>Deselect All</Button>
+                <Button variant="outline" size="sm" onClick={() => selectByKeyword('4K')}>Check All 4K</Button>
+                <Button variant="outline" size="sm" onClick={() => selectByKeyword('selective')}>Check All Selective</Button>
+                <Button variant="outline" size="sm" onClick={() => selectByKeyword('optional')}>Check All Optional</Button>
                 <div className="flex-1" />
                 <Button
                   onClick={handleStart}
@@ -430,18 +439,22 @@ export default function App() {
           </Card>
         )}
 
-        {(phase === 'resolving' || phase === 'downloading' || phase === 'extracting' || phase === 'done') && (
+        {/* ── Resolution phase ── */}
+        {(phase === 'submitting' || phase === 'resolving') && (
           <Card>
             <CardHeader>
-              <CardTitle>
-                {phase === 'resolving' && 'Resolving links...'}
-                {phase === 'downloading' && 'Downloads'}
-                {phase === 'extracting' && 'Extracting...'}
-                {phase === 'done' && 'Complete'}
+              <CardTitle className="flex items-center gap-2">
+                <Wifi className="h-5 w-5" />
+                {phase === 'submitting' ? 'Submitting to ff-resolver...' : 'Resolving links'}
               </CardTitle>
+              <CardDescription>
+                {phase === 'submitting'
+                  ? 'Sending batch to the ff-resolver service on your homelab.'
+                  : `ff-resolver is processing ${resolveEntries.size > 0 ? resolveEntries.size : '?'}/${resolving?.total || selectedItems.length} links. Downloads start as each link resolves.`}
+              </CardDescription>
             </CardHeader>
-            <CardContent className="space-y-6">
-              {resolving && phase !== 'extracting' && phase !== 'done' && (
+            <CardContent className="space-y-4">
+              {resolving && (
                 <div className="space-y-2">
                   <Progress value={(resolving.current / resolving.total) * 100} />
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -451,6 +464,56 @@ export default function App() {
                 </div>
               )}
 
+              {/* Per-link status list */}
+              {selectedItems.length > 0 && (
+                <ScrollArea className="h-[250px] rounded-md border">
+                  <div className="space-y-0.5 p-2">
+                    {selectedItems.map((item) => {
+                      const entry = resolveEntries.get(item.url);
+                      const status = entry?.status || 'pending';
+                      return (
+                        <div
+                          key={item.url}
+                          className="flex items-center gap-3 rounded-md px-3 py-2 text-sm"
+                        >
+                          {status === 'ok' ? (
+                            <Check className="h-4 w-4 text-green-500 shrink-0" />
+                          ) : status === 'fail' ? (
+                            <X className="h-4 w-4 text-red-500 shrink-0" />
+                          ) : (
+                            <Clock className="h-4 w-4 text-muted-foreground shrink-0" />
+                          )}
+                          <span className="flex-1 truncate">{item.name}</span>
+                          <span className={`text-xs shrink-0 ${
+                            status === 'ok' ? 'text-green-500' :
+                            status === 'fail' ? 'text-red-500' :
+                            'text-muted-foreground'
+                          }`}>
+                            {status === 'ok' ? 'Resolved' :
+                             status === 'fail' ? 'Failed' :
+                             'Pending'}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </ScrollArea>
+              )}
+            </CardContent>
+          </Card>
+        )}
+
+        {/* ── Download / Extract / Done phases ── */}
+        {(phase === 'downloading' || phase === 'extracting' || phase === 'done') && (
+          <Card>
+            <CardHeader>
+              <CardTitle>
+                {phase === 'downloading' && 'Downloads'}
+                {phase === 'extracting' && 'Extracting...'}
+                {phase === 'done' && 'Complete'}
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-6">
               {(phase === 'downloading' || phase === 'extracting' || phase === 'done') && progress && (
                 <>
                   <div className="space-y-2">
@@ -505,92 +568,99 @@ export default function App() {
                 </>
               )}
 
-              {phase === 'extracting' && (
-                <div className="space-y-3">
-                  <div className="flex items-center gap-2">
-                    <Loader2 className="h-5 w-5 animate-spin" />
-                    <span>{extractMessage || 'Preparing extraction...'}</span>
-                  </div>
-                  {extractProgress && extractProgress.total > 0 && (
-                    <>
-                      <Progress value={(extractProgress.current / extractProgress.total) * 100} />
-                      <div className="text-sm text-muted-foreground">
-                        Archive {extractProgress.current} of {extractProgress.total}
-                      </div>
-                    </>
+              {extractMessage && (
+                <div className="space-y-2">
+                  <h4 className="text-sm font-medium">Extraction progress</h4>
+                  {extractProgress && (
+                    <Progress
+                      value={
+                        extractProgress.total > 0
+                          ? (extractProgress.current / extractProgress.total) * 100
+                          : 0
+                      }
+                    />
                   )}
+                  <p className="whitespace-pre-wrap text-sm text-muted-foreground">
+                    {extractMessage}
+                  </p>
                 </div>
               )}
 
               {phase === 'done' && (
-                <div className="space-y-4">
-                  <div className="flex items-center gap-2">
-                    <Check className="h-5 w-5 text-green-600" />
-                    <span>All done!</span>
-                  </div>
-                  <div className="flex gap-2">
-                    {downloadFolder && (
-                      <Button variant="outline" onClick={() => api.openFolder(downloadFolder)}>
-                        Open Download Folder
-                      </Button>
-                    )}
-                    {outputFolder && (
-                      <Button variant="outline" onClick={() => api.openFolder(outputFolder)}>
-                        Open Output Folder
-                      </Button>
-                    )}
-                  </div>
+                <div className="flex items-center gap-2 text-green-500">
+                  <Check className="h-5 w-5" />
+                  <span className="font-medium">All downloads and extraction complete.</span>
                 </div>
               )}
             </CardContent>
           </Card>
         )}
-      </div>
 
-      {folderBrowser.open && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-lg rounded-lg border bg-card p-6 text-card-foreground shadow-lg">
-            <h3 className="text-lg font-semibold mb-2">Select folder</h3>
-            <div className="mb-4 text-sm text-muted-foreground break-all">{folderBrowser.currentPath}</div>
-            {folderBrowser.drives.length > 1 && (
-              <div className="mb-3 flex flex-wrap gap-2">
-                {folderBrowser.drives.map((drive) => (
-                  <Button key={drive} variant="outline" size="sm" onClick={() => navigateFolderBrowser(drive + '\\')}>
-                    {drive}
-                  </Button>
-                ))}
+        {/* ── Folder browser modal ── */}
+        {folderBrowser.open && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+            <div className="w-full max-w-lg rounded-lg border bg-card p-6 shadow-lg space-y-4">
+              <h3 className="text-lg font-semibold">Select Folder</h3>
+              <div className="flex gap-2">
+                <select
+                  className="flex-1 rounded-md border bg-background px-3 py-2 text-sm"
+                  value=""
+                  onChange={(e) => {
+                    if (e.target.value) navigateFolderBrowser(e.target.value);
+                  }}
+                >
+                  <option value="">Change drive...</option>
+                  {folderBrowser.drives.map((d) => (
+                    <option key={d} value={d}>
+                      {d}
+                    </option>
+                  ))}
+                </select>
               </div>
-            )}
-            <div className="mb-4 max-h-80 overflow-y-auto rounded-md border">
-              <div
-                className="flex items-center gap-2 p-2 hover:bg-muted cursor-pointer"
-                onClick={() => navigateFolderBrowser('..')}
-              >
-                <span>📁</span>
-                <span>..</span>
+              <div className="text-sm text-muted-foreground break-all">{folderBrowser.currentPath}</div>
+              <ScrollArea className="h-[300px] rounded-md border">
+                <div className="space-y-0.5 p-2">
+                  {(() => {
+                    const parent = folderBrowser.currentPath
+                      .replace(/[\\/]+$/, '')
+                      .replace(/[\\/][^\\/]+$/, '');
+                    if (parent && parent !== folderBrowser.currentPath) {
+                      return (
+                        <button
+                          className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm hover:bg-muted"
+                          onClick={() => navigateFolderBrowser('..')}
+                        >
+                          <FolderOpen className="h-4 w-4" />
+                          ..
+                        </button>
+                      );
+                    }
+                    return null;
+                  })()}
+                  {folderBrowser.entries.map((entry) =>
+                    entry.isDirectory ? (
+                      <button
+                        key={entry.name}
+                        className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm hover:bg-muted"
+                        onClick={() => navigateFolderBrowser(entry.name)}
+                      >
+                        <FolderOpen className="h-4 w-4" />
+                        {entry.name}
+                      </button>
+                    ) : null
+                  )}
+                </div>
+              </ScrollArea>
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => setFolderBrowser((prev) => ({ ...prev, open: false }))}>
+                  Cancel
+                </Button>
+                <Button onClick={selectFolderBrowser}>Select</Button>
               </div>
-              {folderBrowser.entries
-                .filter((e) => e.isDirectory)
-                .map((entry) => (
-                  <div
-                    key={entry.name}
-                    className="flex items-center gap-2 p-2 hover:bg-muted cursor-pointer"
-                    onClick={() => navigateFolderBrowser(entry.name)}
-                  >
-                    <span>📁</span>
-                    <span>{entry.name}</span>
-                  </div>
-                ))}
-            </div>
-            <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setFolderBrowser((p) => ({ ...p, open: false }))}>
-                Cancel
-              </Button>
-              <Button onClick={selectFolderBrowser}>Select</Button>
             </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }
