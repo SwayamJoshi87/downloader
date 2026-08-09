@@ -93,8 +93,20 @@ export const httpApi = {
   },
 };
 
+let sharedEventSource: EventSource | null = null;
+let sharedEventSourceListenerCount = 0;
+
+function getSharedEventSource(): EventSource {
+  if (!sharedEventSource) {
+    sharedEventSource = new EventSource('/api/events');
+    sharedEventSource.onerror = (err) => console.error('SSE error:', err);
+  }
+  return sharedEventSource;
+}
+
 function onServerEvent<T>(eventName: string, callback: (event: T) => void): () => void {
-  const es = new EventSource('/api/events');
+  const es = getSharedEventSource();
+  sharedEventSourceListenerCount++;
   const handler = (e: MessageEvent) => {
     try {
       callback(JSON.parse(e.data) as T);
@@ -103,9 +115,12 @@ function onServerEvent<T>(eventName: string, callback: (event: T) => void): () =
     }
   };
   es.addEventListener(eventName, handler);
-  es.onerror = (err) => console.error('SSE error:', err);
   return () => {
     es.removeEventListener(eventName, handler);
-    es.close();
+    sharedEventSourceListenerCount--;
+    if (sharedEventSourceListenerCount <= 0) {
+      es.close();
+      sharedEventSource = null;
+    }
   };
 }
