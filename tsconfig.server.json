@@ -3,6 +3,10 @@
     "target": "ES2023",
     "lib": ["ES2023", "DOM"],
     "types": ["node"],
+    "typeRoots": [
+      "./node_modules/@types",
+      "/home/server/.npm-global/lib/node_modules/@types"
+    ],
     "skipLibCheck": true,
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
