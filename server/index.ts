@@ -7,9 +7,10 @@ import { spawn } from 'node:child_process';
 import { inspect } from 'node:util';
 import { decryptPaste } from './lib/pastebin.js';
 import { extractLinks } from './lib/links.js';
-import { resolveFuckingFastLink } from './ff-resolver.js';
 import { downloadWithAria2Queue, killAria2 } from './lib/aria2.js';
 import { extractAndOrganize } from './lib/extractor.js';
+
+const FF_RESOLVER_URL = process.env.FF_RESOLVER_URL || 'http://192.168.2.50:8765';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, '..', 'dist');
@@ -113,19 +114,6 @@ function json(res: http.ServerResponse, status: number, data: unknown) {
   res.end(JSON.stringify(data));
 }
 
-async function withConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const results: R[] = new Array(items.length);
-  const iterator = items.entries();
-  await Promise.all(
-    Array.from({ length: Math.min(limit, items.length) }, async () => {
-      for (const [i, item] of iterator) {
-        results[i] = await fn(item);
-      }
-    })
-  );
-  return results;
-}
-
 async function listFolder(folderPath: string): Promise<{ name: string; isDirectory: boolean }[]> {
   const resolved = path.resolve(folderPath || process.cwd());
   const entries = await fsp.readdir(resolved, { withFileTypes: true });
@@ -227,7 +215,18 @@ async function handleStart(req: http.IncomingMessage, res: http.ServerResponse) 
 
     const selected = items.filter((i) => i.url);
 
-    sendDownloadEvent({ type: 'resolving', current: 0, total: selected.length, message: `Resolving ${selected.length} link(s)...` });
+    sendDownloadEvent({ type: 'resolving', current: 0, total: selected.length, message: `Submitting ${selected.length} link(s) to resolver...` });
+
+    // Submit batch to ff-resolver service
+    const links = selected.map((i) => i.url);
+    const filenameMap = new Map(selected.map((i) => [i.url, i.name]));
+    const { job_id } = await (await fetch(`${FF_RESOLVER_URL}/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ links }),
+    })).json();
+
+    sendDownloadEvent({ type: 'resolving', current: 0, total: selected.length, message: `Job ${job_id} — resolving ${selected.length} link(s)...` });
 
     let queuedCount = 0;
     await downloadWithAria2Queue(
@@ -235,17 +234,42 @@ async function handleStart(req: http.IncomingMessage, res: http.ServerResponse) 
       downloadFolder,
       (event) => sendDownloadEvent(event),
       async (addDownload) => {
-        await withConcurrency(selected, 3, async (item) => {
-          const resolved = await resolveFuckingFastLink(item.url);
-          await addDownload({ directUrl: resolved.directUrl, filename: item.name });
-          queuedCount++;
-          sendDownloadEvent({
-            type: 'resolving',
-            current: queuedCount,
-            total: selected.length,
-            message: `Queued ${queuedCount}/${selected.length}: ${item.name}`,
-          });
-        });
+        // Poll ff-resolver until complete
+        let lastDone = 0;
+        while (true) {
+          const job = await (await fetch(`${FF_RESOLVER_URL}/jobs/${job_id}`)).json();
+
+          // Feed newly resolved links to aria2c
+          for (let i = lastDone; i < (job.results?.length || 0); i++) {
+            const r = job.results[i];
+            const filename = filenameMap.get(r.url) || r.filename;
+            if (r.direct_url) {
+              await addDownload({ directUrl: r.direct_url, filename });
+              queuedCount++;
+              sendDownloadEvent({
+                type: 'resolving',
+                current: queuedCount,
+                total: selected.length,
+                message: `Queued ${queuedCount}/${selected.length}: ${filename}`,
+              });
+            } else {
+              sendDownloadEvent({
+                type: 'error',
+                message: `Failed to resolve ${filename}: ${r.error || 'unknown error'}`,
+              });
+              queuedCount++;
+            }
+            lastDone = i + 1;
+          }
+
+          if (job.status === 'failed') {
+            sendDownloadEvent({ type: 'error', message: job.error || 'Resolver job failed' });
+            return;
+          }
+          if (job.status === 'completed') break;
+
+          await new Promise((r) => setTimeout(r, 2000));
+        }
       }
     );
 
